@@ -16,13 +16,13 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent"
 ]
-requires-python = ">=3.10, <3.14"
+requires-python = ">=3.10, <3.12"
 dependencies = [
     "huggingface_hub",
     "loguru",
-    "misaki[en]>=0.9.4",
+    "misaki-gruut[en,de,fr]==0.9.4",
     "numpy",
-    "torch",
+    "torch<2.8.0",
     "transformers"
 ]
 
@@ -36,3 +36,12 @@ only-packages = true
 [project.urls]
 Homepage = "https://github.com/hexgrad/kokoro"
 Repository = "https://github.com/hexgrad/kokoro"
+
+[[tool.uv.index]]
+name = "cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "cu126" }
+misaki-gruut = { git = "https://github.com/bkiefer/misaki_gruut.git", tag = "v0.9.4" }

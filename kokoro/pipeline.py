@@ -2,7 +2,8 @@ from .model import KModel
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
-from misaki import en, espeak
+from misaki_gruut import en, de
+from misaki_gruut.gruut import GruutG2P, GruutFallback
 from typing import Callable, Generator, List, Optional, Tuple, Union
 import re
 import torch
@@ -14,31 +15,21 @@ ALIASES = {
     'de': 'd',
     'es': 'e',
     'fr-fr': 'f',
-    'hi': 'h',
     'it': 'i',
     'pt-br': 'p',
-    'ja': 'j',
-    'zh': 'z',
 }
 
 LANG_CODES = dict(
-    # pip install misaki[en]
+    # en.G2P, with gruut as fallback for unknown words
     a='American English',
     b='British English',
 
-    # espeak-ng
-    d='de',
-    e='es',
+    # gruut
+    d='de-de',
+    e='es-es',
     f='fr-fr',
-    h='hi',
-    i='it',
-    p='pt-br',
-
-    # pip install misaki[ja]
-    j='Japanese',
-
-    # pip install misaki[zh]
-    z='Mandarin Chinese',
+    i='it-it',
+    p='pt',
 )
 
 class KPipeline:
@@ -73,7 +64,7 @@ class KPipeline:
         device: Optional[str] = None
     ):
         """Initialize a KPipeline.
-        
+
         Args:
             lang_code: Language code for G2P processing
             model: KModel instance, True to create new model, False for no model
@@ -111,46 +102,29 @@ class KPipeline:
                 self.model = KModel(repo_id=repo_id).to(device).eval()
             except RuntimeError as e:
                 if device == 'cuda':
-                    raise RuntimeError(f"""Failed to initialize model on CUDA: {e}. 
+                    raise RuntimeError(f"""Failed to initialize model on CUDA: {e}.
                                        Try setting device='cpu' or check CUDA installation.""")
                 raise
         self.voices = {}
         if lang_code in 'ab':
-            try:
-                fallback = espeak.EspeakFallback(british=lang_code=='b')
-            except Exception as e:
-                logger.warning("EspeakFallback not Enabled: OOD words will be skipped")
-                logger.warning({str(e)})
-                fallback = None
+            fallback = GruutFallback(british=lang_code=='b')
             self.g2p = en.G2P(trf=trf, british=lang_code=='b', fallback=fallback, unk='')
-        elif lang_code == 'j':
-            try:
-                from misaki import ja
-                self.g2p = ja.JAG2P()
-            except ImportError:
-                logger.error("You need to `pip install misaki[ja]` to use lang_code='j'")
-                raise
-        elif lang_code == 'z':
-            try:
-                from misaki import zh
-                self.g2p = zh.ZHG2P(
-                    version=None if repo_id.endswith('/Kokoro-82M') else '1.1',
-                    en_callable=en_callable
-                )
-            except ImportError:
-                logger.error("You need to `pip install misaki[zh]` to use lang_code='z'")
-                raise
         elif lang_code == 'd':
             try:
-                from misaki import de
                 self.g2p = de.DEG2P()
             except ImportError:
-                logger.error("You need to `pip install misaki[de]` to use lang_code='d'")
+                logger.error("You need to `pip install misaki-gruut[de]` to use lang_code='d'")
+                raise
+        elif lang_code == 'f':
+            try:
+                self.g2p = GruutG2P(language="fr-fr")
+            except ImportError:
+                logger.error("You need to `pip install misaki-gruut[fr]` to use lang_code='f'")
                 raise
         else:
             language = LANG_CODES[lang_code]
-            logger.warning(f"Using EspeakG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'.")
-            self.g2p = espeak.EspeakG2P(language=language)
+            logger.warning(f"Using GruutG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'.")
+            self.g2p = GruutG2P(language=language)
 
     def load_single_voice(self, voice: str):
         if voice in self.voices:
@@ -258,23 +232,23 @@ class KPipeline:
         model: Optional[KModel] = None
     ) -> Generator['KPipeline.Result', None, None]:
         """Generate audio from either raw phonemes or pre-processed tokens.
-        
+
         Args:
             tokens: Either a phoneme string or list of pre-processed MTokens
             voice: The voice to use for synthesis
             speed: Speech speed modifier (default: 1)
             model: Optional KModel instance (uses pipeline's model if not provided)
-        
+
         Yields:
             KPipeline.Result containing the input tokens and generated audio
-            
+
         Raises:
             ValueError: If no voice is provided or token sequence exceeds model limits
         """
         model = model or self.model
         if model and voice is None:
             raise ValueError('Specify a voice: pipeline.generate_from_tokens(..., voice="af_heart")')
-        
+
         pack = self.load_voice(voice).to(model.device) if model else None
 
         # Handle raw phoneme string
@@ -285,7 +259,7 @@ class KPipeline:
             output = KPipeline.infer(model, tokens, pack, speed) if model else None
             yield self.Result(graphemes='', phonemes=tokens, output=output)
             return
-        
+
         logger.debug("Processing MTokens")
         # Handle pre-processed tokens
         for gs, ps, tks in self.en_tokenize(tokens):
@@ -379,16 +353,16 @@ class KPipeline:
         if model and voice is None:
             raise ValueError('Specify a voice: en_us_pipeline(text="Hello world!", voice="af_heart")')
         pack = self.load_voice(voice).to(model.device) if model else None
-        
+
         # Convert input to list of segments
         if isinstance(text, str):
             text = re.split(split_pattern, text.strip()) if split_pattern else [text]
-            
+
         # Process each segment
         for graphemes_index, graphemes in enumerate(text):
             if not graphemes.strip():  # Skip empty segments
                 continue
-                
+
             # English processing (unchanged)
             if self.lang_code in 'ab':
                 logger.debug(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
@@ -403,49 +377,49 @@ class KPipeline:
                     if output is not None and output.pred_dur is not None:
                         KPipeline.join_timestamps(tks, output.pred_dur)
                     yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output, text_index=graphemes_index)
-            
+
             # Non-English processing with chunking
             else:
                 # Split long text into smaller chunks (roughly 400 characters each)
                 # Using sentence boundaries when possible
                 chunk_size = 400
                 chunks = []
-                
+
                 # Try to split on sentence boundaries first
                 sentences = re.split(r'([.!?]+)', graphemes)
                 current_chunk = ""
-                
+
                 for i in range(0, len(sentences), 2):
                     sentence = sentences[i]
                     # Add the punctuation back if it exists
                     if i + 1 < len(sentences):
                         sentence += sentences[i + 1]
-                        
+
                     if len(current_chunk) + len(sentence) <= chunk_size:
                         current_chunk += sentence
                     else:
                         if current_chunk:
                             chunks.append(current_chunk.strip())
                         current_chunk = sentence
-                
+
                 if current_chunk:
                     chunks.append(current_chunk.strip())
-                
+
                 # If no chunks were created (no sentence boundaries), fall back to character-based chunking
                 if not chunks:
                     chunks = [graphemes[i:i+chunk_size] for i in range(0, len(graphemes), chunk_size)]
-                
+
                 # Process each chunk
                 for chunk in chunks:
                     if not chunk.strip():
                         continue
-                        
+
                     ps, _ = self.g2p(chunk)
                     if not ps:
                         continue
                     elif len(ps) > 510:
                         logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
                         ps = ps[:510]
-                        
+
                     output = KPipeline.infer(model, ps, pack, speed) if model else None
                     yield self.Result(graphemes=chunk, phonemes=ps, output=output, text_index=graphemes_index)
